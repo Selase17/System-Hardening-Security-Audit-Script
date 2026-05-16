@@ -33,9 +33,11 @@ bash security_audit.sh
 ```
 
 When run without root, the script detects insufficient privilege at startup and gracefully skips checks that require it (UFW status, `/etc/shadow` read). These appear as `[SKIP]` entries in the report with a clear explanation, rather than misleading failures. Run with `sudo` for full coverage.
-```
 
 > Root privileges are required for `/etc/shadow` and full filesystem scans.
+```
+
+
 
 ## Output
 
