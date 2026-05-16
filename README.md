@@ -20,8 +20,19 @@ A Bash script that audits a Linux system against common security hardening check
 
 ## Usage
 
+Full audit (recommended):
+
 ```bash
 sudo bash security_audit.sh
+```
+
+Partial audit without root:
+
+```bash
+bash security_audit.sh
+```
+
+When run without root, the script detects insufficient privilege at startup and gracefully skips checks that require it (UFW status, `/etc/shadow` read). These appear as `[SKIP]` entries in the report with a clear explanation, rather than misleading failures. Run with `sudo` for full coverage.
 ```
 
 > Root privileges are required for `/etc/shadow` and full filesystem scans.
@@ -40,19 +51,19 @@ sudo bash security_audit.sh
 
 ## What I Learned
 
-Writing this audit tool pushed me deeper into the practical mechanics of Linux security configuration:
+Writing — and then actually running — this audit tool pushed me through several lessons that surprised me:
 
-- **Security audits live or die by their scoring rubric.** Listing 50 findings without prioritisation just produces noise. Designing a weighted scoring system — where a wide-open SSH config costs more points than a missing motd banner — taught me that the *interpretation* of findings is what makes an audit useful, not the raw checks themselves.
+- **Audit tools need three result states, not two.** The first version had only PASS/FAIL. When I ran it without root, the firewall check reported a misleading FAIL because `ufw status` requires root and returned nothing. Adding an explicit SKIP state (with privilege detection at startup) means the tool can now honestly say *"I couldn't verify this"* rather than guessing wrong. That distinction matters in security work.
 
-- **`/etc/ssh/sshd_config` parsing is fiddlier than it looks.** Directives can be commented, duplicated, or overridden by `Match` blocks. Reading the file line-by-line with `grep` misses the override semantics — I had to think about which directive *actually wins* at runtime, not which one appears in the file.
+- **The same finding has different severity on different systems.** Running the tool on my own machine surfaced "world-writable files" findings — but some were real (Minikube installed certs with 777 perms; I fixed with `chmod 600/644`), and others were false positives from WSL exposing Windows-mounted paths as POSIX-777. Taught me that audit findings need context, not just counts.
 
-- **File permission auditing requires real care.** A 644 on `/etc/shadow` is critical; a 644 on `/etc/passwd` is fine. The same number means different things on different files. Encoding that context into the check logic forced me to actually understand the Linux permission model rather than just check raw octal values.
+- **Idempotency in output files is non-trivial.** The first version used `>> "$REPORT"` everywhere, which meant repeated runs in the same day appended to the existing file forever. Fixing this took only one character change (`>` instead of `>>` at the start), but discovering the bug required actually running the tool repeatedly and watching the file grow. *Use your own tools.*
 
-- **Idempotent checks are essential.** The script should produce the same report on identical systems, regardless of when or how often it's run. That meant being careful with anything time-sensitive (last login dates, package age) and surfacing those as informational rather than scored findings.
+- **Filter known false positives explicitly, with comments.** I added `/init`, `/mnt`, `/proc`, `/sys`, and `/run` to the world-writable scan exclusion list, each with a comment explaining why. A tool that flags `/init` as a security issue on every WSL system trains its user to ignore findings — and a security tool whose findings get ignored is worse than no tool at all.
 
-- **Reports must be both human- and machine-readable.** A colour-coded summary is great for an admin running it interactively, but if you want to wire this into CI or central log aggregation, it needs structured output too. Designing for both audiences upfront was cheaper than retrofitting.
+- **Reports must be self-contained.** The summary was originally only printed to terminal — never written to the report file. Anyone reading the saved report would see findings but no totals or score. Writing the summary block to both terminal and file made the saved report usable as a standalone artefact for someone reviewing later.
 
-- **The biggest security wins are usually configuration, not patching.** Most of the high-severity findings I wrote checks for aren't "outdated software" — they're misconfigurations that ship by default. That changed how I think about security work generally: lock down what you have before chasing CVEs.
+- **The biggest security wins are usually configuration, not patching.** Most of the high-severity findings this tool checks for aren't "outdated software" — they're misconfigurations that ship by default. That reframed how I think about security work: lock down what you already have before chasing CVEs.
 
 
 ## Production Hardening Checklist
