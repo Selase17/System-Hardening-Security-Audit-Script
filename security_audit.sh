@@ -11,20 +11,37 @@ NC='\033[0m'   # No Color — resets to default
 PASS=0
 FAIL=0
 WARN=0
+SKIPPED=0
 REPORT="security_audit_$(date +%Y%m%d).txt"
+
+# ── Detect privilege level ──────────────────────────────
+# Some checks (UFW status, /etc/shadow read, full /etc/ssh access) require root.
+# We don't refuse to run as a non-root user — that would block partial audits.
+# Instead we set a flag and skip privileged checks gracefully with a clear note.
+if [ "$(id -u)" -eq 0 ]; then
+    RUN_AS_ROOT=true
+else
+    RUN_AS_ROOT=false
+fi
 
 # ── Initialise report file ───────────────────────────────
 # Truncate (or create) the report file at the start of each run.
 # Using a single `>` here resets the file. All subsequent writes use `>>`
 # which appends to *this* run's report, not stale ones.
-# Without this line, repeated runs on the same day grow the file forever.
 HOSTNAME_LABEL="$(hostname 2>/dev/null || echo unknown-host)"
 TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+
+if [ "$RUN_AS_ROOT" = true ]; then
+    PRIVILEGE_LABEL='root'
+else
+    PRIVILEGE_LABEL='non-root (partial audit)'
+fi
 
 {
     echo "═══════════════════════════════════════════════════════════════"
     echo "  System Hardening & Security Audit Report"
     echo "  Generated: $TIMESTAMP  ·  Host: $HOSTNAME_LABEL"
+    echo "  Privilege: $PRIVILEGE_LABEL"
     echo "═══════════════════════════════════════════════════════════════"
 } > "$REPORT"
 
@@ -44,44 +61,69 @@ warn() {
     echo "[WARN] $1" >> "$REPORT"
     ((WARN++))
 }
+skip() {
+    # SKIP is used when a check can't run due to insufficient privilege.
+    # It's distinct from WARN because the *system* hasn't necessarily failed —
+    # we just couldn't verify. Surfacing this honestly is more useful than guessing.
+    echo -e "${BLUE}[SKIP]${NC} $1"
+    echo "[SKIP] $1" >> "$REPORT"
+    ((SKIPPED++))
+}
 section() {
     echo -e "\n${BLUE}══ $1 ══${NC}"
     echo "" >> "$REPORT"
     echo "══ $1 ══" >> "$REPORT"
 }
 
+# ── Warn at start if running without root ────────────────
+if [ "$RUN_AS_ROOT" = false ]; then
+    echo -e "${YELLOW}WARNING:${NC} Running as non-root user."
+    echo "         Privileged checks (UFW, /etc/shadow) will be skipped."
+    echo "         For a full audit, run: sudo bash $0"
+    echo ""
+fi
+
 # ── Check 1: SSH Hardening ────────────────────────────────
 section 'SSH Configuration'
 SSH_CONFIG="/etc/ssh/sshd_config"
 
-# Root should NEVER be able to SSH in directly
-# If root is compromised, attackers get full control immediately
-if grep -qE '^PermitRootLogin (no|prohibit-password)' "$SSH_CONFIG" 2>/dev/null; then
-    pass 'Root SSH login is disabled'
+# /etc/ssh/sshd_config is world-readable on most systems, so non-root can audit it.
+# But we still check the file exists before parsing.
+if [ ! -r "$SSH_CONFIG" ]; then
+    skip "SSH config not readable at $SSH_CONFIG"
 else
-    fail 'Root SSH login is ENABLED — run: echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
-fi
+    # Root should NEVER be able to SSH in directly
+    # If root is compromised, attackers get full control immediately
+    if grep -qE '^PermitRootLogin (no|prohibit-password)' "$SSH_CONFIG"; then
+        pass 'Root SSH login is disabled'
+    else
+        fail 'Root SSH login is ENABLED — run: echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
+    fi
 
-# Password auth should be off — SSH keys are far more secure
-if grep -qE '^PasswordAuthentication no' "$SSH_CONFIG" 2>/dev/null; then
-    pass 'SSH password authentication is disabled (keys only)'
-else
-    warn 'SSH password authentication is enabled — consider disabling it'
-fi
+    # Password auth should be off — SSH keys are far more secure
+    if grep -qE '^PasswordAuthentication no' "$SSH_CONFIG"; then
+        pass 'SSH password authentication is disabled (keys only)'
+    else
+        warn 'SSH password authentication is enabled — consider disabling it'
+    fi
 
-# SSH should not run on default port 22 — reduces automated attack traffic
-SSH_PORT=$(grep -E '^Port' "$SSH_CONFIG" 2>/dev/null | awk '{print $2}')
-if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" = '22' ]; then
-    warn 'SSH is on default port 22 — consider changing it to reduce scan noise'
-else
-    pass "SSH is running on non-default port: $SSH_PORT"
+    # SSH should not run on default port 22 — reduces automated attack traffic
+    SSH_PORT=$(grep -E '^Port' "$SSH_CONFIG" | awk '{print $2}')
+    if [ -z "$SSH_PORT" ] || [ "$SSH_PORT" = '22' ]; then
+        warn 'SSH is on default port 22 — consider changing it to reduce scan noise'
+    else
+        pass "SSH is running on non-default port: $SSH_PORT"
+    fi
 fi
 
 # ── Check 2: Firewall ─────────────────────────────────────
 section 'Firewall'
 
-# ufw is Ubuntu's firewall wrapper around iptables
-if command -v ufw &>/dev/null; then
+# UFW status requires root — ufw refuses to report state to non-root users.
+# Without this guard, the script reports a misleading [FAIL] when run as a normal user.
+if [ "$RUN_AS_ROOT" = false ]; then
+    skip 'Firewall status check requires root privilege'
+elif command -v ufw &>/dev/null; then
     UFW_STATUS=$(ufw status | head -1 | awk '{print $2}')
     if [ "$UFW_STATUS" = 'active' ]; then
         pass 'UFW firewall is active'
@@ -90,7 +132,6 @@ if command -v ufw &>/dev/null; then
     fi
 else
     warn 'UFW not installed — checking iptables'
-    # Check if iptables has any rules at all
     RULES=$(iptables -L 2>/dev/null | wc -l)
     if [ "$RULES" -gt 8 ]; then
         pass 'iptables rules are configured'
@@ -102,11 +143,18 @@ fi
 # ── Check 3: SUID/SGID Files ─────────────────────────────
 section 'SUID / SGID Files'
 
-# SUID (Set User ID) means the file runs as its OWNER, not the user running it
-# /bin/sudo is SUID — it runs as root even when a normal user calls it
-# Unexpected SUID files are a major attack vector — attackers plant them
+# SUID (Set User ID) means the file runs as its OWNER, not the user running it.
+# /bin/sudo is SUID — it runs as root even when a normal user calls it.
+# Unexpected SUID files are a major attack vector — attackers plant them.
+# `find / -perm -4000` works for normal users on world-readable directories,
+# but will miss SUID files in directories only root can read.
+# We note this caveat when running without root.
+if [ "$RUN_AS_ROOT" = false ]; then
+    warn 'Running without root — SUID scan may miss files in restricted directories'
+fi
+
 SUID_FILES=$(find / -xdev -type f -perm -4000 2>/dev/null | sort)
-SUID_COUNT=$(echo "$SUID_FILES" | wc -l)
+SUID_COUNT=$(echo "$SUID_FILES" | grep -c .)
 
 # A safe baseline has around 10-20 SUID files
 if [ "$SUID_COUNT" -lt 30 ]; then
@@ -117,14 +165,14 @@ fi
 
 echo '  SUID files found:' >> "$REPORT"
 echo "$SUID_FILES" | while read -r f; do
-    echo "    $f" >> "$REPORT"
+    [ -n "$f" ] && echo "    $f" >> "$REPORT"
 done
 
 # ── Check 4: World-Writable Files ────────────────────────
 section 'World-Writable Files'
 
 # World-writable = any user on the system can modify the file
-# This is dangerous — an attacker could modify scripts or configs
+# This is dangerous — an attacker could modify scripts or configs.
 WW_FILES=$(find / -xdev -type f -perm -002 2>/dev/null | grep -v /proc | grep -v /sys)
 WW_COUNT=$(echo "$WW_FILES" | grep -c . || true)
 
@@ -133,15 +181,16 @@ if [ "$WW_COUNT" -eq 0 ]; then
 else
     fail "$WW_COUNT world-writable file(s) found — review immediately"
     echo "$WW_FILES" | head -20 | while read -r f; do
-        echo "  → $f" >> "$REPORT"
+        [ -n "$f" ] && echo "  → $f" >> "$REPORT"
     done
 fi
 
 # ── Check 5: Unattended Upgrades ─────────────────────────
 section 'Security Updates'
 
-# Unpatched systems are the #1 cause of breaches
-# unattended-upgrades automatically installs security patches
+# Unpatched systems are the #1 cause of breaches.
+# unattended-upgrades automatically installs security patches.
+# `dpkg -l` is readable by anyone, so this check works without root.
 if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
     pass 'unattended-upgrades is installed'
 else
@@ -151,17 +200,20 @@ fi
 # ── Check 6: Empty Passwords ─────────────────────────────
 section 'Password Security'
 
-# /etc/shadow stores hashed passwords
-# An empty second field means NO password — anyone can log in as that user
-EMPTY_PASS=$(awk -F: '($2 == "" || $2 == "!") {print $1}' /etc/shadow 2>/dev/null | grep -v '^$')
-if [ -z "$EMPTY_PASS" ]; then
-    pass 'No accounts with empty passwords found'
+# /etc/shadow is mode 0640 and owned by root — non-root cannot read it.
+# This is the single most privilege-sensitive check in the audit.
+if [ "$RUN_AS_ROOT" = false ]; then
+    skip '/etc/shadow not readable — empty password check requires root'
 else
-    # Indent the account list under the FAIL header for readability
-    fail 'Accounts with empty/locked passwords:'
-    echo "$EMPTY_PASS" | while read -r u; do
-        echo "    $u" | tee -a "$REPORT"
-    done
+    EMPTY_PASS=$(awk -F: '($2 == "" || $2 == "!") {print $1}' /etc/shadow 2>/dev/null | grep -v '^$')
+    if [ -z "$EMPTY_PASS" ]; then
+        pass 'No accounts with empty/locked passwords found'
+    else
+        fail 'Accounts with empty/locked passwords:'
+        echo "$EMPTY_PASS" | while read -r u; do
+            echo "    $u" | tee -a "$REPORT"
+        done
+    fi
 fi
 
 # ── Final Score ───────────────────────────────────────────
@@ -175,18 +227,19 @@ else
 fi
 
 # Print to terminal AND append to report file using a single block.
-# Previously the summary was only printed to stdout — never written to $REPORT —
-# which is why the report file ended without a summary section.
 {
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
     echo "  AUDIT SUMMARY"
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  [PASS]   $PASS"
-    echo "  [WARN]   $WARN"
-    echo "  [FAIL]   $FAIL"
+    echo "  [PASS]    $PASS"
+    echo "  [WARN]    $WARN"
+    echo "  [FAIL]    $FAIL"
+    if [ "$SKIPPED" -gt 0 ]; then
+        echo "  [SKIP]    $SKIPPED  (run as root for full coverage)"
+    fi
     echo "  ─────────────────"
-    echo "  Score    $SCORE / 100"
+    echo "  Score     $SCORE / 100"
     echo "═══════════════════════════════════════════════════════════════"
 } >> "$REPORT"
 
@@ -194,9 +247,12 @@ fi
 echo ""
 echo -e "${BLUE}══ AUDIT COMPLETE ══${NC}"
 echo "──────────────────────"
-echo -e "${GREEN}PASS: $PASS${NC}"
-echo -e "${YELLOW}WARN: $WARN${NC}"
-echo -e "${RED}FAIL: $FAIL${NC}"
+echo -e "${GREEN}PASS:  $PASS${NC}"
+echo -e "${YELLOW}WARN:  $WARN${NC}"
+echo -e "${RED}FAIL:  $FAIL${NC}"
+if [ "$SKIPPED" -gt 0 ]; then
+    echo -e "${BLUE}SKIP:  $SKIPPED${NC}  (run as root for full coverage)"
+fi
 echo "──────────────────────"
 echo "Security Score: $SCORE / 100"
 echo ""
