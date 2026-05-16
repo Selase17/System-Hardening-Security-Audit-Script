@@ -13,6 +13,21 @@ FAIL=0
 WARN=0
 REPORT="security_audit_$(date +%Y%m%d).txt"
 
+# ── Initialise report file ───────────────────────────────
+# Truncate (or create) the report file at the start of each run.
+# Using a single `>` here resets the file. All subsequent writes use `>>`
+# which appends to *this* run's report, not stale ones.
+# Without this line, repeated runs on the same day grow the file forever.
+HOSTNAME_LABEL="$(hostname 2>/dev/null || echo unknown-host)"
+TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+
+{
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "  System Hardening & Security Audit Report"
+    echo "  Generated: $TIMESTAMP  ·  Host: $HOSTNAME_LABEL"
+    echo "═══════════════════════════════════════════════════════════════"
+} > "$REPORT"
+
 # ── Helper Functions ─────────────────────────────────────
 pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
@@ -42,7 +57,7 @@ SSH_CONFIG="/etc/ssh/sshd_config"
 # Root should NEVER be able to SSH in directly
 # If root is compromised, attackers get full control immediately
 if grep -qE '^PermitRootLogin (no|prohibit-password)' "$SSH_CONFIG" 2>/dev/null; then
- echo -e    pass 'Root SSH login is disabled'
+    pass 'Root SSH login is disabled'
 else
     fail 'Root SSH login is ENABLED — run: echo "PermitRootLogin no" >> /etc/ssh/sshd_config'
 fi
@@ -142,20 +157,47 @@ EMPTY_PASS=$(awk -F: '($2 == "" || $2 == "!") {print $1}' /etc/shadow 2>/dev/nul
 if [ -z "$EMPTY_PASS" ]; then
     pass 'No accounts with empty passwords found'
 else
-    fail "Accounts with empty/locked passwords: $EMPTY_PASS"
+    # Indent the account list under the FAIL header for readability
+    fail 'Accounts with empty/locked passwords:'
+    echo "$EMPTY_PASS" | while read -r u; do
+        echo "    $u" | tee -a "$REPORT"
+    done
 fi
 
 # ── Final Score ───────────────────────────────────────────
 TOTAL=$((PASS + FAIL + WARN))
-echo -e "\n${BLUE}══ AUDIT COMPLETE ══${NC}"
+
+# Guard against division by zero (would only happen if zero checks ran)
+if [ "$TOTAL" -gt 0 ]; then
+    SCORE=$(echo "scale=0; $PASS * 100 / $TOTAL" | bc)
+else
+    SCORE=0
+fi
+
+# Print to terminal AND append to report file using a single block.
+# Previously the summary was only printed to stdout — never written to $REPORT —
+# which is why the report file ended without a summary section.
+{
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "  AUDIT SUMMARY"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "  [PASS]   $PASS"
+    echo "  [WARN]   $WARN"
+    echo "  [FAIL]   $FAIL"
+    echo "  ─────────────────"
+    echo "  Score    $SCORE / 100"
+    echo "═══════════════════════════════════════════════════════════════"
+} >> "$REPORT"
+
+# Terminal output (with colours)
+echo ""
+echo -e "${BLUE}══ AUDIT COMPLETE ══${NC}"
 echo "──────────────────────"
 echo -e "${GREEN}PASS: $PASS${NC}"
-echo -e "${RED}FAIL: $FAIL${NC}"
 echo -e "${YELLOW}WARN: $WARN${NC}"
+echo -e "${RED}FAIL: $FAIL${NC}"
 echo "──────────────────────"
-
-# Calculate percentage score
-SCORE=$(echo "scale=0; $PASS * 100 / $TOTAL" | bc)
 echo "Security Score: $SCORE / 100"
 echo ""
 echo "Full report saved to: $REPORT"
