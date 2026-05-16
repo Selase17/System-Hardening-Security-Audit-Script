@@ -173,7 +173,14 @@ section 'World-Writable Files'
 
 # World-writable = any user on the system can modify the file
 # This is dangerous — an attacker could modify scripts or configs.
-WW_FILES=$(find / -xdev -type f -perm -002 2>/dev/null | grep -v /proc | grep -v /sys)
+# Exclude virtual/system paths that always appear world-writable due to filesystem
+# semantics rather than real permissions issues:
+#   /proc, /sys   — kernel virtual filesystems
+#   /init         — WSL kernel-userspace bridge file
+#   /mnt          — Windows drives mounted in WSL (NTFS doesn't model POSIX perms)
+#   /run          — runtime tmpfs, recreated each boot
+WW_FILES=$(find / -xdev -type f -perm -002 2>/dev/null \
+    | grep -Ev '^(/proc|/sys|/init|/mnt|/run)')
 WW_COUNT=$(echo "$WW_FILES" | grep -c . || true)
 
 if [ "$WW_COUNT" -eq 0 ]; then
