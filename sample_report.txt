@@ -4,11 +4,12 @@
 ═══════════════════════════════════════════════════════════════
 
 ══ SSH Configuration ══
+[PASS] Root SSH login is disabled
 [WARN] SSH password authentication is enabled — consider disabling it
 [PASS] SSH is running on non-default port: 2222
 
 ══ Firewall ══
-[FAIL] UFW firewall is INACTIVE — run: ufw enable
+[PASS] UFW firewall is active
 
 ══ SUID / SGID Files ══
 [PASS] SUID files count is reasonable: 15 files
@@ -30,12 +31,7 @@
     /usr/lib/polkit-1/polkit-agent-helper-1
 
 ══ World-Writable Files ══
-[FAIL] 5 world-writable file(s) found — review immediately
-  → /home/user/.minikube/cert.pem
-  → /home/user/.minikube/key.pem
-  → /home/user/.minikube/ca.pem
-  → /usr/local/bin/kubectl
-  → /init
+[PASS] No unexpected world-writable files found
 
 ══ Security Updates ══
 [PASS] unattended-upgrades is installed
@@ -54,9 +50,11 @@
     pcp
 
 ═══════════════════════════════════════════════════════════════
-  SUMMARY
+  AUDIT SUMMARY
 ═══════════════════════════════════════════════════════════════
-  [PASS]   4
-  [WARN]   1
-  [FAIL]   3
+  [PASS]    6
+  [WARN]    1
+  [FAIL]    1
+  ─────────────────
+  Score     75 / 100
 ═══════════════════════════════════════════════════════════════
